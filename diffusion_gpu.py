@@ -54,11 +54,18 @@ def main():
 
     trajectory_files = args.trajectory
     trajectory = np.array([False])
-    for file in args.trajectory:
-        with open(file,"rb") as f:
-            trajectories.append(pickle.load(f))
-    trajectory=np.vstack(trajectories)
+    trajectories = []
+    if len(args.trajectory) > 1:
+        for file in args.trajectory:
+            with open(file,"rb") as f:
+                trajectories.append(pickle.load(f))
+        trajectory=np.vstack(trajectories)
+    else:
+        with open(args.trajectory[0],"rb") as f:
+            trajectory=pickle.load(f)
+    del trajectories
         # trajectory: shape (nframes*natoms, 4)  with columns [id, x, y, z]
+    trajectory = trajectory[:,:-1]
     ids    = trajectory[:, 0].astype(int)
     coords = trajectory[:, 1:]               # shape (nframes*natoms, 3)
     
@@ -66,14 +73,14 @@ def main():
     unique_ids = np.unique(ids)
     natoms     = unique_ids.size
     nframes    = trajectory.shape[0] // natoms
-    print(natoms,nframes,np.shape(trajectory))
+    print(f"natoms={natoms},nframes={nframes},shape of trajectory={np.shape(trajectory)}")
     assert nframes * natoms == trajectory.shape[0]
     
     # build a lookup from atom ID → row index in positions
     id_to_index = { atom_id: idx for idx, atom_id in enumerate(unique_ids) }
     
-    # allocate output: (natoms, nframes, 3)
-    positions = np.empty((natoms, nframes, 3), dtype=coords.dtype)
+    # allocate output: (nframes, natoms, 3)
+    positions = np.empty((nframes, natoms, 3), dtype=coords.dtype)
     
     # scatter each frame’s block into positions
     for frame in range(nframes):
@@ -86,10 +93,9 @@ def main():
         # map IDs to the 0…natoms-1 row indices
         indices = [id_to_index[a] for a in block_ids]
     
-        # place x,y,z into positions[:, frame, :]
-        positions[indices, frame, :] = block_coords
-    
-    # now positions.shape == (natoms, nframes, 3)
+        # place x,y,z into positions[frame, :, :]
+        positions[frame, indices, :] = block_coords
+ 
 
     # Move to TensorFlow GPU
     positions_tf = tf.convert_to_tensor(positions, dtype=tf.float32)
@@ -106,7 +112,7 @@ def main():
 
     # Save per-atom MSD curves
     logging.info("Writing per-atom MSD curves...")
-    for i in range(n_atoms):
+    for i in range(natoms):
         msd_curve = all_msd[:, i]
         out = np.column_stack((lagtimes, msd_curve))
         fn  = f"{args.output}_msd_atom_{i:04d}.dat"
@@ -115,7 +121,7 @@ def main():
     # Fit per-atom diffusion coefficients
     fit_start, fit_end = args.fit_start, args.fit_end
     diffusion_coeffs = []
-    for i in range(n_atoms):
+    for i in range(natoms):
         slope, intercept, _, _, _ = linregress(
             lagtimes[fit_start:fit_end],
             all_msd[fit_start:fit_end, i]
@@ -127,7 +133,7 @@ def main():
     # Save diffusion coefficients
     diff_fn = f"{args.output}_diffusion_coeffs.dat"
     np.savetxt(diff_fn, diffusion_coeffs,
-               header=f"# per-atom D (Å^2/frame) for {n_atoms} atoms", comments="")
+               header=f"# per-atom D (Å^2/frame) for {natoms} atoms", comments="")
 
     # Plot histogram of D
     plt.hist(diffusion_coeffs, bins=30, alpha=0.7)
