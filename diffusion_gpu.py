@@ -1,4 +1,3 @@
-import MDAnalysis as mda
 import numpy as np
 import argparse
 import logging
@@ -6,6 +5,7 @@ from tqdm import tqdm
 import tensorflow as tf
 from scipy.stats import linregress
 import matplotlib.pyplot as plt
+import pickle
 
 #-------------------------------------------------------------------------------
 @tf.function
@@ -28,16 +28,10 @@ def compute_all_msd(positions, lagtimes):
 
 def main():
     parser = argparse.ArgumentParser(description="Compute per-atom MSDs and diffusion coefficients using TF/GPU.")
-    parser.add_argument("Group_1", type=str,
-                        help="Atom selection string for MDAnalysis (e.g. 'resname SOL').")
-    parser.add_argument("-s", "--top",  type=str, default="topology.tpr",
-                        help="Topology file (TPR, PSF, etc.)")
-    parser.add_argument("-f", "--traj", nargs='+', default=["traj.trr"],
-                        help="Trajectory files (space-separated list) or single file.")
+    parser.add_argument("-f", "--trajectory", nargs='+', default=["traj.pkl"],
+                        help="Trajectory files (space-separated list) or single file. Pickled array of positions after selection")
     parser.add_argument("-o", "--output", type=str, default="output",
                         help="Base name for output files.")
-    parser.add_argument("-n", "--nslices", type=int, default=1,
-                        help="Number of box slices (unused in this example).")
     parser.add_argument("-t", "--lagtime", type=int, default=100,
                         help="Maximum lag (in frames) for MSD calculation.")
     parser.add_argument("--fit_start", type=int, default=10,
@@ -58,22 +52,46 @@ def main():
              logging.WARNING)
     logging.basicConfig(level=level)
 
-    # Load Universe
-    logging.info("Initializing MDAnalysis Universe...")
-    u = mda.Universe(args.top, args.traj, continuous=True)
-    n_frames = len(u.trajectory) if args.num is None else args.num
-    group = u.select_atoms(args.Group_1)
-    n_atoms = len(group)
-    if n_atoms == 0:
-        raise ValueError(f"No atoms matched selection '{args.Group_1}'")
-
-    # Read positions into NumPy
-    pos_list = []
-    logging.info(f"Stacking {n_frames} frames of {n_atoms} atoms...")
-    for i, ts in enumerate(tqdm(u.trajectory, total=n_frames)):
-        if i >= n_frames: break
-        pos_list.append(group.positions.copy())
-    positions = np.stack(pos_list, axis=0)  # shape (n_frames, n_atoms, 3)
+    trajectory_files = args.trajectory
+    trajectory = np.array([False])
+    for file in args.trajectory:
+       f = open(file,"rb")
+       if trajectory.any():
+           trajectory=np.vstack(trajectory,pickle.load(f))
+       else:
+           trajectory=pickle.load(f)
+        # trajectory: shape (nframes*natoms, 4)  with columns [id, x, y, z]
+    ids    = trajectory[:, 0].astype(int)
+    coords = trajectory[:, 1:]               # shape (nframes*natoms, 3)
+    
+    # figure out how many atoms & frames
+    unique_ids = np.unique(ids)
+    natoms     = unique_ids.size
+    nframes    = trajectory.shape[0] // natoms
+    print(natoms,nframes,np.shape(trajectory))
+    assert nframes * natoms == trajectory.shape[0]
+    
+    # build a lookup from atom ID → row index in positions
+    id_to_index = { atom_id: idx for idx, atom_id in enumerate(unique_ids) }
+    
+    # allocate output: (natoms, nframes, 3)
+    positions = np.empty((natoms, nframes, 3), dtype=coords.dtype)
+    
+    # scatter each frame’s block into positions
+    for frame in range(nframes):
+        start = frame * natoms
+        end   = start + natoms
+        block = trajectory[start:end]        # shape (natoms, 4)
+        block_ids    = block[:, 0].astype(int)
+        block_coords = block[:, 1:]          # shape (natoms, 3)
+    
+        # map IDs to the 0…natoms-1 row indices
+        indices = [id_to_index[a] for a in block_ids]
+    
+        # place x,y,z into positions[:, frame, :]
+        positions[indices, frame, :] = block_coords
+    
+    # now positions.shape == (natoms, nframes, 3)
 
     # Move to TensorFlow GPU
     positions_tf = tf.convert_to_tensor(positions, dtype=tf.float32)
