@@ -55,11 +55,9 @@ def main():
     trajectory_files = args.trajectory
     trajectory = np.array([False])
     for file in args.trajectory:
-       f = open(file,"rb")
-       if trajectory.any():
-           trajectory=np.vstack(trajectory,pickle.load(f))
-       else:
-           trajectory=pickle.load(f)
+        with open(file,"rb") as f:
+            trajectories.append(pickle.load(f))
+    trajectory=np.vstack(trajectories)
         # trajectory: shape (nframes*natoms, 4)  with columns [id, x, y, z]
     ids    = trajectory[:, 0].astype(int)
     coords = trajectory[:, 1:]               # shape (nframes*natoms, 3)
